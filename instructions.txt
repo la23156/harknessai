@@ -1,0 +1,412 @@
+# CLAUDE CODE INSTRUCTIONS: English Course Prompt Generator
+# =============================================================
+# Project: HarknessAI Prompt Catalogue Generator
+# Purpose: For each course in english_courses.py, generate three sets of five
+#          LLM prompts: (1) Harkness discussion scripts, (2) essay prompts,
+#          (3) teacher class-session lesson plans. All prompts must include
+#          specific quotes, passages, and page references sourced via Exa and/
+#          or OpenAI web search before prompt generation.
+# =============================================================
+
+
+## PROJECT STRUCTURE TO CREATE
+
+harknessai_prompts_from_catalogue/
+├── english_courses.py          # already exists — source data, do NOT modify
+├── api_openai.py               # OpenAI client + prompt-generation functions
+├── api_exa.py                  # Exa search + content-fetching functions
+├── main.py                     # orchestrator: iterates courses, calls APIs, saves output
+├── output/                     # auto-create; one JSON file per course code
+│   └── {COURSE_CODE}.json
+└── instructions.txt            # this file
+
+
+## DEPENDENCIES
+
+Use the following Python packages:
+  - openai              (pip install openai)
+  - exa-py              (pip install exa-py)
+  - python-dotenv       (pip install python-dotenv)
+
+Read API keys from environment variables via dotenv:
+  OPENAI_API_KEY
+  EXA_API_KEY
+
+Never hardcode keys.
+
+
+## FILE: api_exa.py
+
+Purpose: All interactions with the Exa API live here. No prompt generation in
+this file — only search and content retrieval.
+
+Functions to implement:
+
+1. get_exa_client() -> exa_py.Exa
+   - Initialize and return Exa client using EXA_API_KEY from environment.
+
+2. search_book_passages(book_title: str, author: str, topic: str,
+                        num_results: int = 5) -> list[dict]
+   - Search Exa for passages, quotes, and page references from a specific book.
+   - Query should be structured as:
+       f'"{book_title}" {author} quote passage excerpt "{topic}"'
+   - Use Exa's neural search with text contents enabled (include full text).
+   - Return list of dicts: [{url, title, text_excerpt, published_date}, ...]
+   - If no results, return empty list — never raise; caller handles fallback.
+
+3. search_work_context(title: str, author: str,
+                       context_type: str = "themes") -> list[dict]
+   - Search for critical analysis, chapter summaries, themes, and scholarly
+     commentary on a given work.
+   - context_type can be "themes", "chapter summary", "historical context",
+     "character analysis", "symbolism", etc.
+   - Query: f'{author} "{title}" {context_type} literary analysis'
+   - Return same list[dict] shape as search_book_passages.
+
+4. extract_usable_quotes(results: list[dict],
+                          max_quotes: int = 8) -> list[str]
+   - Take raw Exa results and extract clean, usable quote strings.
+   - Each quote string should be formatted as:
+       '"[quote text]" — [title], [author] (source: [url domain])'
+   - Truncate individual quote text to 300 characters max.
+   - Return list of up to max_quotes formatted quote strings.
+
+Note on Exa usage:
+   Use exa.search_and_contents() with:
+     text=True, highlights=True, num_results=num_results
+   This returns both text and highlighted passages, which give the most
+   precise quote-level material.
+
+
+## FILE: api_openai.py
+
+Purpose: All interactions with the OpenAI API live here, including prompt
+construction and generation. Import and call api_exa.py functions from within
+these functions to enrich prompts with sourced content before sending to GPT.
+
+Functions to implement:
+
+1. get_openai_client() -> openai.OpenAI
+   - Initialize and return OpenAI client using OPENAI_API_KEY from environment.
+
+2. fetch_web_context(query: str, client: openai.OpenAI) -> str
+   - Use OpenAI's responses API with web_search_preview tool enabled to
+     fetch current web content about a query.
+   - This is a FALLBACK for when Exa returns insufficient results.
+   - Model: "gpt-4o"
+   - Return the text content of the response as a plain string.
+   - If the API does not support web search in the current environment, catch
+     the exception and return an empty string — never crash.
+
+3. generate_harkness_prompts(course: dict,
+                              sourced_quotes: list[str],
+                              client: openai.OpenAI) -> list[dict]
+   - Generate FIVE Harkness-style discussion scripts for the given course.
+   - Each script is a complete, ready-to-use Harkness discussion session.
+   - Model: "gpt-4o" with a high max_tokens (4000+).
+   - Return list of 5 dicts, each with keys:
+       {
+         "title": str,           # short label, e.g. "Macbeth and Moral Ambiguity"
+         "prompt": str           # full detailed prompt (see format below)
+       }
+
+   FORMAT for each Harkness discussion script prompt:
+   ---------------------------------------------------
+   The prompt passed to GPT must instruct it to produce a full script containing:
+     A) OPENING QUESTION (~50 words): A rich, open-ended question tied to a
+        specific passage, moment, or theme from the text that has no obvious
+        right answer. Must reference the specific text and, where possible, a
+        specific quote or scene.
+     B) DISCUSSION GOALS (3-5 bullet points): What students should surface,
+        argue, or probe by the end of the discussion.
+     C) ESSENTIAL QUESTIONS (4-6): Follow-up questions the teacher can deploy
+        if discussion stalls or a productive thread emerges. Each should push
+        students deeper into the text, reference specific scenes or characters,
+        and avoid yes/no framing.
+     D) ANTICIPATED STUDENT RESPONSES: Two or three sample student lines of
+        inquiry (paraphrased), showing what productive student contributions
+        might look like — including at least one interpretive disagreement.
+     E) TEXTUAL EVIDENCE ANCHOR: 2-3 specific quotes or passages (with page
+        numbers or act/scene/line references where known) that the discussion
+        should orbit. Use the sourced_quotes supplied to this function as the
+        raw material; if a quote is usable, embed it verbatim.
+     F) CLOSING SYNTHESIS MOVE: A prompt the teacher can use in the final 5
+        minutes to help students articulate an emerging collective insight.
+
+   HARKNESS METHOD CONTEXT to include in the system prompt:
+   ---------------------------------------------------------
+   Harkness discussion is a student-led, collaborative inquiry method developed
+   at Phillips Exeter Academy. Students sit around a table and build on each
+   other's ideas without the teacher moderating. The teacher observes, maps
+   the discussion, and only intervenes to redirect or deepen. The goal is
+   genuine co-construction of meaning, not recitation of pre-formed answers.
+   Good Harkness questions are generative, text-anchored, and genuinely
+   contested — students should need the text in front of them to participate
+   meaningfully. Opening questions should be unanswerable without close
+   reading, yet accessible enough that every student can enter the conversation.
+
+4. generate_essay_prompts(course: dict,
+                           sourced_quotes: list[str],
+                           client: openai.OpenAI) -> list[dict]
+   - Generate FIVE essay prompts for the given course.
+   - These prompts will be fed DIRECTLY to an LLM (not to a human student),
+     so they must be extremely detailed and self-contained.
+   - Model: "gpt-4o" with max_tokens 4000+.
+   - Return list of 5 dicts, each with keys:
+       {
+         "title": str,     # short label
+         "prompt": str     # full detailed prompt (see format below)
+       }
+
+   FORMAT for each essay prompt:
+   ------------------------------
+   Each prompt must be a single cohesive text (not bullet points) that
+   instructs the LLM (acting as a student writer) to produce an essay. Include:
+     A) ESSAY TYPE declaration: argumentative, comparative, close-reading,
+        personal-response, research-based, etc.
+     B) CENTRAL ARGUMENT TASK: Exactly what thesis the essay should argue,
+        prove, or explore. Be specific — do not leave the thesis open. An LLM
+        receiving this prompt should know precisely what position to take.
+     C) REQUIRED TEXTUAL EVIDENCE: Name at least 3 specific passages, with
+        quotes embedded verbatim (sourced from sourced_quotes where possible),
+        including act/scene/line or chapter/page references. The LLM must
+        engage with these specific moments.
+     D) COUNTERARGUMENT REQUIREMENT: The essay must address and rebut at least
+        one strong opposing interpretation.
+     E) STRUCTURAL GUIDANCE: Suggested paragraph count, approximate word
+        target (600–1000 words for standard essays), and any required sections
+        (introduction, body paragraphs, conclusion).
+     F) VOICE AND REGISTER: Specify the expected analytic register (formal
+        academic, personal-reflective, journalistic, etc.), relevant to the
+        course's character.
+     G) COURSE CONTEXT SENTENCE: One sentence connecting the prompt explicitly
+        to the course's stated goals and the broader intellectual themes of
+        the course.
+
+5. generate_lesson_plan_prompts(course: dict,
+                                 sourced_quotes: list[str],
+                                 client: openai.OpenAI) -> list[dict]
+   - Generate FIVE teacher lesson plan prompts for the given course.
+   - CRITICAL: Each prompt must target a SPECIFIC, NARROW TOPIC within the
+     course — a single class session covering one scene, one poem, one chapter,
+     one concept. Not the whole course or a whole unit. A real teacher teaching
+     a 10-week course will have ~30 individual class sessions; each prompt
+     here should target one such session.
+   - Model: "gpt-4o" with max_tokens 4000+.
+   - Return list of 5 dicts, each with keys:
+       {
+         "title": str,     # e.g. "Lesson: Macbeth Act II Scene 2 — The Dagger Soliloquy"
+         "prompt": str     # full detailed prompt (see format below)
+       }
+
+   FORMAT for each lesson plan prompt:
+   -------------------------------------
+   The prompt instructs the LLM (acting as an experienced teacher) to produce
+   a complete 45–60 minute class session plan. Include:
+     A) SESSION FOCUS: Exactly which text, chapter, scene, poem, or concept
+        this lesson covers. Be narrow and specific (e.g., "Hamlet Act III
+        Scene 1, lines 56–88" or "Baldwin's 'Sonny's Blues,' specifically
+        the narrator's shift in understanding at the jazz club").
+     B) LEARNING OBJECTIVES (3-4): Observable outcomes. What will students be
+        able to do or understand by the end of class that they could not before?
+     C) ENTRY ACTIVITY (5–8 min): A specific warm-up or do-now tied to the
+        day's focus — a short quote for annotation, a provocative question on
+        the board, or a brief writing prompt.
+     D) DIRECT INSTRUCTION / MINI-LESSON (10 min): What the teacher explicitly
+        teaches (a literary device, historical context, close-reading technique)
+        before releasing students to the text. Reference the specific passage
+        or technique being modeled.
+     E) CLOSE READING / DISCUSSION ACTIVITY (20–25 min): The central activity.
+        Must specify the exact passage(s) being analyzed (with quotes where
+        sourced), the method (pair-share, Harkness, Socratic seminar, annotated
+        close reading, dramatic reading, etc.), and two or three lens questions
+        to drive the analysis.
+     F) ASSESSMENT / EXIT ACTIVITY (5–10 min): How the teacher will gauge
+        understanding — an exit ticket question, a brief written response, a
+        turn-and-talk synthesis, or a one-sentence claim students must commit to.
+     G) DIFFERENTIATION NOTES: One suggestion each for students who need
+        scaffolding and for students ready for extension.
+     H) MATERIALS LIST: Texts, handouts, or multimedia (specific film clip with
+        timestamp, if relevant) needed for the lesson.
+
+
+## FILE: main.py
+
+Purpose: Top-level orchestrator. Import from english_courses.py, api_exa.py,
+and api_openai.py. Do NOT define any prompt logic here — only orchestration.
+
+Logic flow:
+
+```
+for each course in courses (from english_courses.py):
+
+    1. EXTRACT TEXTS
+       Parse course["description"] and course["tags"] to identify all named
+       books, authors, plays, and poems. Build a list of (title, author) tuples.
+       If no specific texts can be identified (e.g., the course is a writing
+       workshop with no named texts), skip the Exa search step and pass an
+       empty sourced_quotes list to the generators.
+
+    2. FETCH EXA CONTENT
+       For each identified (title, author) pair (limit to top 3 most prominent
+       works per course to control cost):
+         a. Call search_book_passages() with 2-3 topic queries relevant to
+            the course description (pull topics from course["tags"]).
+         b. Call search_work_context() for "themes" and "historical context".
+       Aggregate all results, then call extract_usable_quotes() to produce a
+       clean list of quote strings.
+       If Exa returns fewer than 3 usable quotes, call fetch_web_context()
+       via api_openai.py as a fallback for each missing work.
+
+    3. GENERATE PROMPTS
+       Call all three generators in sequence:
+         harkness  = generate_harkness_prompts(course, sourced_quotes, client)
+         essays    = generate_essay_prompts(course, sourced_quotes, client)
+         lessons   = generate_lesson_plan_prompts(course, sourced_quotes, client)
+
+    4. SAVE OUTPUT
+       Write to output/{course["code"]}.json with structure:
+         {
+           "course_code": str,
+           "course_title": str,
+           "sourced_quotes": list[str],            # quotes used as context
+           "harkness_discussion_prompts": list[dict],
+           "essay_prompts": list[dict],
+           "lesson_plan_prompts": list[dict]
+         }
+       Create the output/ directory if it does not exist.
+       Print a progress line: "Generated: {code} — {title}"
+
+    5. RATE LIMITING
+       Add a 2-second sleep between courses to avoid hitting API rate limits.
+```
+
+main() should accept an optional --course CLI argument to run a single course
+by code (e.g. `python main.py --course EN301`), useful for testing.
+
+If --course is not supplied, run all courses.
+
+
+## PROMPT ENGINEERING REQUIREMENTS — CRITICAL
+
+When building the system and user messages sent to OpenAI, follow these rules:
+
+1. ALWAYS embed the course description verbatim in the system prompt context.
+2. ALWAYS include the sourced quotes list. Frame them as:
+     "Use the following sourced passages as textual anchors in your output.
+      Where a passage is usable, embed it verbatim with its attribution."
+3. For Harkness and lesson plan prompts, include this reminder in the system
+   message:
+     "This is a Lawrenceville School (boarding school, grades 9–12) context.
+      Students are capable, motivated readers. Assume the text has been read.
+      Aim for the intellectual level of a strong undergraduate seminar."
+4. For essay prompts, include:
+     "These prompts will be given directly to an LLM acting as a student
+      writer. Be extremely specific. Do not leave room for vague or generic
+      responses. Name the exact passages the LLM must engage with."
+5. For lesson plans, the system message must include:
+     "Each lesson plan should be for ONE specific 45–60 minute class session
+      on ONE narrow topic within the course. Do not plan a whole unit. Plan
+      a single day. Be granular about timing."
+
+
+## SOURCING SPECIFICITY — EXAMPLES
+
+The following illustrates the level of textual specificity required. These are
+examples only — apply analogous specificity for every course:
+
+EN301 (English III — reads Macbeth):
+  Exa queries should find passages like:
+    - Macbeth Act I Scene 7: "If it were done when 'tis done, then 'twere well /
+      It were done quickly."
+    - Macbeth Act II Scene 2: "Will all great Neptune's ocean wash this blood /
+      Clean from my hand?"
+    - Act V Scene 5: "Tomorrow, and tomorrow, and tomorrow, / Creeps in this
+      petty pace from day to day"
+  Also search for Baldwin ("Sonny's Blues"), Fitzgerald, Hansberry (A Raisin in
+  the Sun), O'Connor ("A Good Man Is Hard to Find"), Dickinson poems.
+
+EN508 (African American Literature — reads Invisible Man, Song of Solomon):
+  Exa queries should target:
+    - Ellison, Invisible Man: the prologue ("I am an invisible man..."), the
+      Battle Royal scene (Ch. 1), Tod Clifton's funeral speech.
+    - Morrison, Song of Solomon: the opening scene ("The North Carolina Mutual
+      Life Insurance agent..."), Pilate's character introduction, Milkman's
+      flight at the end.
+    - Baldwin: "Letter to My Nephew" from The Fire Next Time.
+
+EN533 (Moby Dick):
+  Exa queries should surface:
+    - Chapter 1 "Loomings": "Call me Ishmael."
+    - Chapter 36 "The Quarter-Deck": "To the last I grapple with thee; from
+      hell's heart I stab at thee."
+    - Chapter 42 "The Whiteness of the Whale" — Melville's symbolic analysis.
+    - Chapter 135 "The Chase — Third Day" — the final confrontation.
+
+
+## OUTPUT JSON SCHEMA (per course file)
+
+{
+  "course_code": "EN301",
+  "course_title": "English III",
+  "generated_at": "<ISO timestamp>",
+  "sourced_quotes": [
+    "\"If it were done when 'tis done...\" — Macbeth, Shakespeare (source: folger.edu)",
+    ...
+  ],
+  "harkness_discussion_prompts": [
+    {
+      "title": "Macbeth and the Psychology of Ambition",
+      "prompt": "<full multi-paragraph Harkness script as described above>"
+    },
+    ... (5 total)
+  ],
+  "essay_prompts": [
+    {
+      "title": "Conscience and Complicity in Macbeth",
+      "prompt": "<full detailed LLM-ready essay prompt as described above>"
+    },
+    ... (5 total)
+  ],
+  "lesson_plan_prompts": [
+    {
+      "title": "Lesson: Macbeth Act I Scene 7 — The Soliloquy of Indecision",
+      "prompt": "<full 45–60 min lesson plan prompt as described above>"
+    },
+    ... (5 total)
+  ]
+}
+
+
+## ERROR HANDLING
+
+- Wrap each course's processing in a try/except block. On failure, log the
+  error to stderr and write a partial JSON with an "error" key; do not crash
+  the whole run.
+- If Exa API is unavailable, fall back to web search via OpenAI for all
+  sourcing; log that fallback was used.
+- If OpenAI generation fails for one prompt type (e.g. lesson plans), still
+  save whatever was generated and include an "error" key for the failed type.
+
+
+## CODE STYLE AND ORGANIZATION
+
+- Use type hints throughout.
+- Use dataclasses or TypedDicts for structured return types where helpful.
+- Keep api_exa.py and api_openai.py stateless (no globals) — accept clients
+  as parameters or initialize inside functions using get_*_client() helpers.
+- All print/logging to stderr except final success confirmation per course.
+- No hardcoded course-specific logic in api_openai.py or api_exa.py — all
+  course-specific text (titles, authors, themes) flows in as parameters.
+- main.py should be the only file that imports from english_courses.py.
+
+
+## RUNNING THE SCRIPT
+
+# Process all courses:
+python main.py
+
+# Process one course for testing:
+python main.py --course EN301
+
+# Output goes to output/{CODE}.json for each course.
